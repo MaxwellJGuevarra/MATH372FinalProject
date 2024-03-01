@@ -1,0 +1,319 @@
+---
+title: "Disney+ Data Analysis"
+author: "Maxwell Guevarra, Mia Kobayashi, Eunice Tu"
+date: "2022-12-15"
+output: html_document
+---
+
+```{r include=FALSE}
+library(stringr)
+library(leaps)
+library(glmnet)
+library(lmtest)
+library(broom)
+library(olsrr)
+library(MASS)
+library(Hmisc)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(caret)
+
+set.seed(1)
+
+source("Functions.R")
+
+```
+
+
+## Pre-processing/Data Clean-UP
+```{r}
+#initial data load
+disney.data <- read.csv(file = "titles.csv")
+
+#clean copy of data
+df.c <- disney.data
+df.c$seasons[is.na(df.c$seasons)] <- 0
+df.c <- na.omit(df.c)
+response <- df.c$imdb_score
+df.c <- df.c[, -c(1, 2, 4, 11, 12)]
+
+#Factorize "type"
+df.c$type <- as.factor(df.c$type)
+
+#Factorize "age_cert"
+df.c$age_certification <- as.numeric(as.factor(df.c$age_certification))
+
+#Factorize "genres"
+df.c$genres <- sub("\\[", "", df.c$genres)
+df.c$genres <- sub("\\]", "", df.c$genres)
+df.c$genres <- str_split_fixed(df.c$genres, pattern = ",", n = 2)
+df.c$genres <- df.c$genres[, -2]
+df.c$genres <- as.numeric(as.factor(df.c$genres))
+
+#Factorize "prod_country"
+df.c$production_countries <- sub("\\[", "", df.c$production_countries)
+df.c$production_countries <- sub("\\]", "", df.c$production_countries)
+df.c$production_countries <- str_split_fixed(df.c$production_countries, pattern = ",", n = 2)
+df.c$production_countries <- df.c$production_countries[, -2]
+df.c$production_countries <- as.numeric(as.factor(df.c$production_countries))
+
+```
+
+
+#### Inital Variable Correlations and Graphs
+```{r}
+cor(df.c[, unlist(lapply(df.c, is.numeric))])
+
+hist.data.frame(df.c)
+
+
+```
+
+Some Notes About the Data
+
+- `tmdb_score` seems to be normally distributed
+
+- As the years increase, the number of movies seem to be produced exponentially
+
+- There appear to be groupings in the distribution for `runtime`
+
+- There doesn't appear to be any strong correlations between the variables
+
+
+---
+
+## Prediction Analysis
+
+#### Initial Regression Models
+```{r}
+
+xy.l <- inital.predict(df.c, response)
+
+#Saving the Training and Test Sets
+x <- xy.l[[1]]
+y <- xy.l[[2]]
+x.train <- xy.l[[3]]
+y.train <- xy.l[[4]]
+x.test <- xy.l[[5]]
+y.test <- xy.l[[6]]
+
+```
+
+
+#### Notes About the Models
+
+- When comparing the LASSO and Ridge models, both sets of metrics are relatively the same but the Ridge model is technically better with a smaller MSPE and larger $R^2$
+
+- The LASSO model does label some variables as "unimportant" with a coefficient of 0
+
+- The Full OLS model has the best $R^2$ value between the three models
+
+- The coefficients between the OLS and Ridge models are fairly close outside of a couple of variables; LASSO has the most coefficient shrinkage
+
+- Based on the above observations, we might want to choose the Full OLS model; however we can use the variable selection from LASSO to fit another OLS model and compare metrics
+
+
+#### OLS Model Variants
+```{r}
+#Full OLS model
+ols.full <- lm(response ~ ., data = df.c)
+
+#OLS with selected variables
+ols.select <- lm(response ~ release_year + seasons + imdb_votes + tmdb_score, data = df.c)
+
+#OLS with LASSO selected variables
+ols.las <- ols.LAS <- lm(response ~ type + release_year + production_countries + seasons + imdb_votes + tmdb_score, data = df.c)
+
+```
+
+- The "Selected" OLS model consists of variables that had a >2-star significance level based on the full model summary (p = 4)
+
+- The "LASSO" OLS model consists of variables selected by the LASSO regression process from above (p = 6)
+
+
+
+#### Comparing Metrics Across OLS Models
+```{r}
+#OLS Full
+olstr.full <- lm(y.train ~ ., data.frame(x.train))
+metrics.full <- metrics(olstr.full, data.frame(x.test), y.test)
+ols.full.rsq <- metrics.full[[1]]
+ols.full.rmse <- metrics.full[[2]]
+ols.full.aic <- metrics.full[[3]]
+ols.full.bic <- metrics.full[[4]]
+met.list.full <- c(ols.full.rsq, ols.full.rmse, ols.full.aic, ols.full.bic)
+
+
+#OLS Selected
+olstr.select <- lm(y.train ~ release_year + seasons + imdb_votes + tmdb_score, data.frame(x.train))
+metrics.select <- metrics(olstr.select, data.frame(x.test), y.test)
+ols.select.rsq <- metrics.select[[1]]
+ols.select.rmse <- metrics.select[[2]]
+ols.select.aic <- metrics.select[[3]]
+ols.select.bic <- metrics.select[[4]]
+met.list.sel <- c(R2 = ols.select.rsq, ols.select.rmse, ols.select.aic, ols.select.bic)
+
+#OLS LASSO
+olstr.las <- lm(y.train ~ typeSHOW + release_year + production_countries + seasons + imdb_votes + tmdb_score, data.frame(x.train))
+metrics.las <- metrics(olstr.las, data.frame(x.test), y.test)
+ols.las.rsq <- metrics.las[[1]]
+ols.las.rmse <- metrics.las[[2]]
+ols.las.aic <- metrics.las[[3]]
+ols.las.bic <- metrics.las[[4]]
+met.list.las <- c(R2 = ols.las.rsq, ols.las.rmse, ols.las.aic, ols.las.bic)
+
+met.list.all <- data.frame(Full = met.list.full, Select = met.list.sel, LASSO = met.list.las)
+row.names(met.list.all) <- c("R2", "RMSE", "AIC", "BIC")
+met.list.all
+
+```
+
+- The "Selected" OLS model had the best metrics across all three models
+
+  - Has the greatest $R^2$ value -- more variability is explained by this model compared to the others
+  
+  - Has the best RMSE, AIC, and BIC values (lowest values)
+  
+    - The standard deviations of the residuals are low, and the quality of the model is the best out of the three based on the AIC/BIC scores
+  
+- Based on these comparisons, the "Selected" OLS model should be the final predictive model
+
+
+---
+
+## Explanatory Analysis
+
+#### Diagnostics
+```{r}
+diagnostics(ols.full)
+
+```
+
+Linearity Assumption:
+  
+  - The data seems to be dispersed randomly around the mean residual value of 0
+  
+  - The correlation value is practically 0
+  
+  - Can assume linearity in the data
+  
+Homoskedasticity Assumption:
+
+  - The spreads of the data are not exactly even
+  
+  - Furthermore, the Breush-Pagan test indicates that heteroskedasticity is present
+  
+  - Cannot assume homoskedasticity in the data
+  
+Normality Assumption:
+
+  - Hard to tell from the QQ-Plot if the trend is exactly linear
+  
+  - KS-test results in a small p-value, thus we cannot assume normality for the data
+  
+
+
+#### Outlier Identification
+
+Since the data did not initially pass some of the assumptions above, let's try and identify any outliers and/or points of leverage
+
+```{r}
+visual.out(response)
+
+```
+
+With a simple visualization, can see that there are about 12 outliers in the dataset.
+
+We can use Cook's Distance to remove any points of leverage from the dataset  
+
+```{r}
+list.co <- cooks.dist(ols.full, df.c)
+df.co <- list.co[[1]]
+response.co <- list.co[[2]]
+length(response) - length(response.co)
+
+```
+
+50 points of leverage were removed. Will now see how the modified dataset operates under diagnostics.  
+
+
+#### Diagnostics on New Dataset (Cook's)
+```{r}
+ols.co <- lm(response.co ~ ., df.co)
+summary(ols.co)
+
+diagnostics(ols.co)
+
+```
+
+Looking at the spread of residuals across the fitted values, the spread isn't still entirely even -- there seems to be a more dense cluster around zero.  There is probably a difference in variation.  
+Modified dataset now passes normality assumption.
+
+#### Boxcox Transformation
+```{r}
+new.response <- bc.t(ols.full, response)
+ols.bc <- lm(new.response ~ ., data = df.c)
+
+```
+
+#### Diagnostics with Boxcox transformation
+```{r}
+diagnostics(ols.bc)
+
+```
+
+QQ-Plot:  
+- has some smaller residuals bottom right
+- still some larger residuals top right
+- some sway from central tendency, overall okay
+
+Correlation is close to 0, passes normality assumption.  
+Looking at the spread of residuals across the fitted values, the spread now more even. Left outliers are obviously removed, maybe potentially still a far right outlier. 
+
+Due to similar diagnostic results, we would rather keep the points taken out by Cook's Distance for our final explanatory model.
+
+
+#### Choose Between Selected and LASSO
+```{r}
+f.tests(ols.select, ols.las)
+
+```
+
+$H_0$: smaller model (OLS selected) is sufficient to explain the data  
+$H_1$: larger model (LASSO) is required to explain the variability in y  
+
+p-value from the F-test is > 0.05, the alpha value, and the F-statistic being close to zero indicates that we should fail to reject the null and keep the smaller OLS selected model to represent the Disney+ dataset. However these models are fitted on the full dataset which did not pass the normality assumption above. Therefore this test is invalid.
+
+
+#### Selected vs LASSO OLS Models with Boxcox Data
+```{r}
+ols.select.bc <- lm(new.response ~ release_year + seasons + imdb_votes + tmdb_score, df.c)
+ols.las.bc <- lm(new.response ~ type + release_year + production_countries + seasons + imdb_votes + tmdb_score, df.c)
+
+f.tests(ols.select.bc, ols.las.bc)
+
+
+```
+
+$H_0$: smaller model (OLS selected) is sufficient to explain the data  
+$H_1$: larger model (LASSO) is required to explain the variability in y  
+
+p-value from the F-test is also > 0.05, the alpha value, and the F-statistic being close to zero indicates that we should fail to reject the null and keep the smaller OLS selected model to represent the Disney+ dataset.
+
+These models were made with the transformed data that did pass the normality assumption, thus this "selected" OLS model will be the final explanatory model.
+
+```{r}
+summary(ols.select.bc)
+
+#MSE
+mean(summary(ols.select.bc)$residuals^2)
+
+```
+
+Notes about the model metrics
+
+- Adjusted $R^2$: 0.4012 -- Based on both the Adj. $R^2$ and regular $R^2$ values, about 40% of the varibaility in the data is explained by this model
+
+- Each predictor is considered significant at the highest alpha level of 0.01
+
